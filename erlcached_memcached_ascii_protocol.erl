@@ -57,10 +57,10 @@ loop(Socket, Request) ->
       Request1 = list_to_binary([Request, Data]),
       {Command, Rest} =  read_line(Socket, Request1, <<>>),
       case parse_command(Command) of
-        {cmd_set, {Key, Flags, Exptime, ByteCount}} ->
+        {storage_command, CommandFunc, {Key, Flags, Exptime, ByteCount}} ->
           {Blob, Rest1} = read_blob(Socket, ByteCount, Rest),
           {_, Rest2} = read_line(Socket, Rest1, <<>>),
-          case erlcached_server:cache_set(Key, Flags, Exptime, Blob) of
+          case CommandFunc(Key, Flags, Exptime, Blob) of
              ok -> reply(Socket, "STORED\r\n");
              Error -> handle_error(Socket, Error)
           end,
@@ -112,11 +112,11 @@ read_line(Socket, [], Rest) ->
 %% Parses a command and returns a tuple identifying the command
 %% and its arguments.
 parse_command("set " ++ Rest) ->
-  parse_storage_command(cmd_set, Rest);
+  parse_storage_command(fun erlcached_server:cache_set/4, Rest);
 parse_command("add " ++ Rest) ->
-  parse_storage_command(cmd_add, Rest);
+  parse_storage_command(fun erlcached_server:cache_add/4, Rest);
 parse_command("replace " ++ Rest) ->
-  parse_storage_command(cmd_replace, Rest);
+  parse_storage_command(fun erlcached_server:cache_replace/4, Rest);
 parse_command("get " ++ Rest) ->
   {ok, Keys} = regexp:split(Rest, " "),
   {cmd_get, [{Key} || Key <- Keys]};
@@ -128,7 +128,7 @@ parse_storage_command(Command, Rest) ->
   io:format("parse_storage_command~n"),
   case regexp:split(Rest, " ") of
     {ok, [Key, Flags, Exptime, ByteCount]} ->      
-      try {Command, {Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(ByteCount)}} 
+      try {storage_command, Command, {Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(ByteCount)}} 
       catch 
         _:_ -> {bad_command, "set " ++ Rest}
       end;
@@ -154,8 +154,10 @@ send_values(Socket, []) ->
 
 handle_error(Socket, Error) ->
   case Error of 
-    {server_error, Reason} -> reply(Socket, "SERVER_ERROR " ++ Reason ++ "\r\n");
-    {client_error, Reason} -> reply(Socket, "CLIENT_ERROR " ++ Reason ++ "\r\n");
+    {server_error, Reason}            -> reply(Socket, "SERVER_ERROR " ++ Reason ++ "\r\n");
+    {client_error, Reason}            -> reply(Socket, "CLIENT_ERROR " ++ Reason ++ "\r\n");
+    {error_key_already_set, _Key}     -> reply(Socket, "CLIENT_ERROR Key already set\r\n");
+    {error_key_not_already_set, _Key} -> reply(Socket, "CLIENT_ERROR Key not already set\r\n");
     error -> reply(Socket, "ERROR\r\n")
   end.
 
