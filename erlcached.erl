@@ -2,7 +2,7 @@
 -export([start/1]).
 -import(lists, [reverse/1]).
 -define(TABLE, erlcached_table).
-
+-define(END, "\r\n\r\n").
 
 %% Starts  erlcached listening  on Port  The server  listens using  the.
 %% 'Hybrid Approach' (neither blocking  nor non-blocking) This function.
@@ -48,13 +48,40 @@ init_cache() ->
 %% Receives  a single  command. It  doesn't validate  the command,  just
 %% reads data until we have read two blank lines. TODO: limit the amount
 %% of data we consume here?
-receive_command("\r\n\r\n" ++ T, L) -> {reverse(L), T};               %% If we are at the end of request, return the request
+receive_command(?END ++ T, L) -> {reverse(L), T};               %% If we are at the end of request, return the request
 receive_command([H|T], L)           -> receive_command(T, [H|L]);     %% Work our way through the list, from H to T
 receive_command([], _)              -> more.                          %% We went thru list with no "\r\n\r\n" so we need more.
 
 %% Handles a request from the client.  The request has not been
 %% validated yet.
 handle_request(Request, Socket) ->
-  
-  gen_tcp:send(Socket, "Thankyou! " ++ Request ++ "\n"),
-  gen_tcp:close(Socket).
+  case parse_request(Request) of
+    {cache_set, Key, Value, Expires}    -> set_value(Key, Value, Expires};
+    {cache_get, Key}                    -> get_value(Key);
+    {cache_delete, Key}                 -> delete_value(Key);
+    {cache_stats, Key}                  -> send_key_stats(Key);
+    {cache_stats, general}              -> send_general_stats();
+    {parse_error, Reason}               -> self ! {parse_error, Reason}
+  end;
+  self ! close_connection,
+  receive
+    {set_ok, Key}               -> gen_tcp:send(Socket, "OK SET " ++ Key ++ ?END);
+    {get_ok, Value}             -> gen_tcp:send(Socket, "OK GET " ++ Value ++ ?END);
+    {delete_ok, Key}            -> gen_tcp:send(Socket, "OK DELETE " ++ Key ++ ?END);
+    {key_stats_ok, Key, Stats}  -> gen_tcp:send(Socket, "OK KEY STATS " ++ Key ++ " " ++ Stats ++ ?END);
+    {general_stats_ok, Stats}   -> gen_tcp:send(Socket, "OK GENERAL STATS " ++ Key ++ " " ++ Stats ++ ?END);
+    {parse_error, Reason}       -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND: " ++ Reason ++ ?END);
+    {command_error, Reason}     -> gen_tcp:send(Socket, "ERR " ++ Reason ++ ?END)
+  end.
+
+set_value(Key, Value, _Expires) ->
+  case ets:insert(?TABLE, {Key, Value}) of
+    true -> self ! {cache_set, Key, Value, _Expires},
+    _ -> self ! {command_error, "COULD NOT INSERT KEY " ++ Key}
+  end.
+
+get_value(Key) ->
+  case ets:lookup(?TABLE, Key) of
+    [] -> 
+  end.
+
