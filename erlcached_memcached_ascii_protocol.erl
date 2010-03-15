@@ -15,18 +15,16 @@
   code_change/3]).
 -compile(export_all).
 
-start() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [{port, 9898}], []).
+start() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [{port, get_port()}], []).
 stop() -> gen_server:call(?MODULE, stop).
-init([{port, Port}]) -> {ok, Port}.
-
-%% Public API.
-protocol_start_listening() -> 
-  gen_server:call(?MODULE, {start_listening}).
+init([{port, Port}]) -> 
+  {ok, Listener} = gen_tcp:listen(Port, 
+    [binary, {packet, 0}, {reuseaddr, true}, {active, once}]),
+  spawn(fun() -> connect(Listener) end),
+  {ok, Port}.
 
 %% gen_server callbacks
-handle_call({start_listening}, _From, Port) ->
-  {ok, Listener} = gen_tcp:listen(Port, [binary, {packet, 0}, {reuseaddr, true}, {active, once}]),
-  spawn(fun() -> connect(Listener) end),
+handle_call(_, _From, Port) ->
   {reply, ok, Port}.
 
 handle_cast(_Msg, State) ->
@@ -53,16 +51,21 @@ connect(Listen) ->
 %% and processed. After processing of a request, the socket is closed.
 %% TODO: timeout waiting for data.
 loop(Socket, Request) ->
+  inet:setopts(Socket, [{active, once}]),
   receive
     {tcp, Socket, Data} ->
-      inet:setopts(Socket, [{active, once}]),
-      Request1 = Request ++ binary_to_list(Data),
-      case receive_first_line_of_command(Request1, []) of
-        more ->
-          loop(Socket, Request1);
-        {Command, _Rest} ->
-          gen_tcp:send(Socket, "Received command: " ++ Command),
-          gen_tcp:close(Socket)
+      Request1 = list_to_binary([Request, Data]),
+      {Command, Rest} =  read_line(Socket, Request1, <<>>),
+      case parse_command(Command) of 
+        {cmd_set, {Key, Flags, Exptime, ByteCount}} ->
+          {Blob, Rest1} = read_blob(Socket, ByteCount, Rest),
+          {_, Rest2} = read_line(Socket, Rest1, <<>>),
+          case erlcached_server:cache_set(Key, Flags, Exptime, Blob) of
+             ok -> reply(Socket, "STORED");
+             Error -> handle_error(Socket, Error)
+          end,
+          io:format("next command~n"),
+          loop(Socket, Rest2)
       end;
     {tcp_closed, Socket} ->
       io:format("server socket closed~n");
@@ -73,16 +76,60 @@ loop(Socket, Request) ->
 %% Gets the port that we listen on from the application
 %% configuration.
 get_port() ->
-  case application:get_env(erlcached_memcached_ascii_protocol, port) of
+  case application:get_env(erlcached, ascii_protocol_port) of
     {ok, Port} when is_integer(Port), Port > 0, Port < 65535 ->
       Port;
-    Bad -> exit({bad_config, {erlcached_memcached_ascii_protocol, {port, Bad}}})
+    Bad -> exit({bad_config, {erlcached, {ascii_protocol_port, Bad}}})
   end.
 
+%% Reads a single line of text from the socket.  Returns the new line (without the
+%% \r\n) and the rest of the binary data following the new line.
+read_line(_Socket, "\r\n" ++ Rest, Line) -> 
+  {lists:reverse(Line), list_to_binary(Rest)};               
+read_line(Socket, Data, Rest) when is_binary(Data), is_binary(Rest) -> 
+  read_line(Socket, binary_to_list(Data), binary_to_list(Rest));
+read_line(Socket, [H|T], L) -> 
+  read_line(Socket, T, [H|L]);     
+read_line(Socket, [], Rest) -> 
+  inet:setopts(Socket, [{active, once}]),
+  receive
+    {tcp, Socket, Data} ->
+      read_line(Socket, binary_to_list(Data), Rest)
+  end.
 
-%% If we are at the end of request, return the request
-receive_first_line_of_command("\r\n" ++ T, L) -> {lists:reverse(L), T};               
-%% Work our way through the list, from H to T
-receive_first_line_of_command([H|T], L)           -> receive_first_line_of_command(T, [H|L]);     
-%% We went thru list with no "\r\n\r\n" so we need more.
-receive_first_line_of_command([], _)              -> more.      
+parse_command("set " ++ Rest) ->
+  parse_storage_command(cmd_set, Rest);
+parse_command("add " ++ Rest) ->
+  parse_storage_command(cmd_add, Rest);
+parse_command("replace " ++ Rest) ->
+  parse_storage_command(cmd_replace, Rest).
+
+
+parse_storage_command(Command, Rest) ->
+  io:format("parse_storage_command~n"),
+  {ok, [Key, Flags, Exptime, ByteCount]} = regexp:split(Rest, " "),
+  {Command, {Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(ByteCount)}}.
+
+reply(Socket, Text) ->
+  gen_tcp:send(Socket, Text ++ "\r\n").
+
+handle_error(Socket, Error) ->
+  case Error of 
+    {server_error, Reason} -> reply(Socket, "SERVER_ERROR " ++ Reason);
+    {client_error, Reason} -> reply(Socket, "CLIENT_ERROR " ++ Reason);
+    error -> reply(Socket, "ERROR")
+  end.
+
+%% Reads a blob of binary data (of a predetermined size) from the socket.
+%% Returns a tuple of the form {Blob, Rest} where Rest is the last chunk 
+%% of the data read from the socket beyond the blob.
+read_blob(_Socket, ByteCount, Data) when size(Data) >= ByteCount ->
+  io:format("read_blob1~n"),
+  split_binary(Data, ByteCount);
+read_blob(Socket, ByteCount, Data) ->
+  io:format("read_blob2~n"),
+  inet:setopts(Socket, [{active, once}]),
+  receive
+    {tcp, Socket1, Data1} -> 
+      read_blob(Socket1, ByteCount, list_to_binary([Data, Data1]))
+  end.

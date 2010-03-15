@@ -21,7 +21,7 @@
 start() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 stop() -> gen_server:call(?MODULE, stop).
 
-%% The functions starting with 'cache_' represent the public interface
+%% The functions starting with 'cache_' represent the exported interface
 %% to the cache.
 cache_set(Key, Flags, Expire, Bytes) -> 
   gen_server:call(?MODULE, {cache_set, Key, Flags, Expire, Bytes}).
