@@ -108,11 +108,16 @@ parse_request(Request) ->
   end.
 
 set_value(Key, Value) ->
-  case ets:insert(?TABLE, {list_to_binary(Key), list_to_binary(Value)}) of
-    true
-      -> self() ! {set_ok, Key};
-    _ 
-      -> self() ! {command_error, "FAILED TO INSERT"}
+  case ets:delete(?TABLE, list_to_binary(Key)) of
+    true 
+      -> case ets:insert(?TABLE, {list_to_binary(Key), list_to_binary(Value)}) of
+          true
+            -> self() ! {set_ok, Key};
+          _ 
+            -> self() ! {command_error, "FAILED TO INSERT"}
+          end;
+     _
+      -> self() ! {command_error, "COULD NOT CLEAR KEY BEFORE INSERT"}
   end.
 
 get_value(Key) ->
