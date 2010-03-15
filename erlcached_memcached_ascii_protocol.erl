@@ -56,22 +56,34 @@ loop(Socket, Request) ->
     {tcp, Socket, Data} ->
       Request1 = list_to_binary([Request, Data]),
       {Command, Rest} =  read_line(Socket, Request1, <<>>),
-      case parse_command(Command) of 
+      try parse_command(Command) of
         {cmd_set, {Key, Flags, Exptime, ByteCount}} ->
           {Blob, Rest1} = read_blob(Socket, ByteCount, Rest),
           {_, Rest2} = read_line(Socket, Rest1, <<>>),
           case erlcached_server:cache_set(Key, Flags, Exptime, Blob) of
-             ok -> reply(Socket, "STORED");
+             ok -> reply(Socket, "STORED\r\n");
              Error -> handle_error(Socket, Error)
           end,
           io:format("next command~n"),
-          loop(Socket, Rest2)
-      end;
+          loop(Socket, Rest2);
+        {cmd_get, Keys} ->
+          try handle_get(Socket, Keys)
+          catch
+            _:Reason -> handle_error(Socket, {server_error, Reason})
+          end
+      catch
+        _:Reason -> handle_error(Socket, {server_error, Reason})
+      end,
+      loop(Socket, Rest);
     {tcp_closed, Socket} ->
       io:format("server socket closed~n");
     _Any ->
       io:format("received unknown message~n")
   end.
+
+handle_get(Socket, Keys) ->
+  Values = erlcached_server:cache_get(Keys),
+  send_values(Socket, Values).
 
 %% Gets the port that we listen on from the application
 %% configuration.
@@ -97,12 +109,17 @@ read_line(Socket, [], Rest) ->
       read_line(Socket, binary_to_list(Data), Rest)
   end.
 
+%% Parses a command and returns a tuple identifying the command
+%% and its arguments.
 parse_command("set " ++ Rest) ->
   parse_storage_command(cmd_set, Rest);
 parse_command("add " ++ Rest) ->
   parse_storage_command(cmd_add, Rest);
 parse_command("replace " ++ Rest) ->
-  parse_storage_command(cmd_replace, Rest).
+  parse_storage_command(cmd_replace, Rest);
+parse_command("get " ++ Rest) ->
+  {ok, Keys} = regexp:split(Rest, " "),
+  {cmd_get, [{Key} || Key <- Keys]}.
 
 
 parse_storage_command(Command, Rest) ->
@@ -110,14 +127,26 @@ parse_storage_command(Command, Rest) ->
   {ok, [Key, Flags, Exptime, ByteCount]} = regexp:split(Rest, " "),
   {Command, {Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(ByteCount)}}.
 
-reply(Socket, Text) ->
-  gen_tcp:send(Socket, Text ++ "\r\n").
+reply(Socket, TextOrData) ->
+  gen_tcp:send(Socket, TextOrData).
+
+%% Replies with values found with the get command
+send_values(Socket, [{Key, {Flags, _, Data}}|Rest]) ->
+  reply(Socket, "VALUE " ++ Key ++ " " ++ integer_to_list(Flags) ++ " "  ++ integer_to_list(size(Data)) ++ "\r\n"),
+  reply(Socket, Data),
+  reply(Socket, "\r\n"),
+  send_values(Socket, Rest);
+send_values(Socket, [{_, not_found}|Rest]) ->
+  send_values(Socket, Rest);
+send_values(Socket, []) ->
+  reply(Socket, "END\r\n").
+  
 
 handle_error(Socket, Error) ->
   case Error of 
-    {server_error, Reason} -> reply(Socket, "SERVER_ERROR " ++ Reason);
-    {client_error, Reason} -> reply(Socket, "CLIENT_ERROR " ++ Reason);
-    error -> reply(Socket, "ERROR")
+    {server_error, Reason} -> reply(Socket, "SERVER_ERROR " ++ Reason ++ "\r\n");
+    {client_error, Reason} -> reply(Socket, "CLIENT_ERROR " ++ Reason ++ "\r\n");
+    error -> reply(Socket, "ERROR\r\n")
   end.
 
 %% Reads a blob of binary data (of a predetermined size) from the socket.
