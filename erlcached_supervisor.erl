@@ -15,16 +15,18 @@ start_link(Args) ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, Args).
 
 init([]) ->
-  %% install personal error handler
-  %%gen_event:swap_handler(alarm_handler, 
-  %%                          {alarm_handler, swap},
-  %%                          {erlcached_alarm_handler, xyz}),
-
   {ok, {{one_for_one, 3, 10},
     [{tag1,
        {erlcached_server, start, []},
        permanent,
        10000,
        worker,
-       [erlcached_server]}]}}.
+       [erlcached_server]},
+    {tag2,
+       {erlcached_memcached_ascii_protocol, start, []},
+       permanent,
+       10000,
+       worker,
+       [erlcached_memcached_ascii_protocol]}]
+   }}.
       

@@ -15,14 +15,19 @@
   code_change/3]).
 -compile(export_all).
 
-start() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [{port, 9898}], []).
 stop() -> gen_server:call(?MODULE, stop).
+init([{port, Port}]) -> {ok, Port}.
 
-init([]) -> {ok, []}.
+%% Public API.
+protocol_start_listening() -> 
+  gen_server:call(?MODULE, {start_listening}).
 
-%% Dummy implementation of handle_call.
-handle_call(_, _From, State) ->
-  {reply, ok, State};
+%% gen_server callbacks
+handle_call({start_listening}, _From, Port) ->
+  {ok, Listener} = gen_tcp:listen(Port, [binary, {packet, 0}, {reuseaddr, true}, {active, once}]),
+  spawn(fun() -> connect(Listener) end),
+  {reply, ok, Port}.
 
 handle_cast(_Msg, State) ->
   {noreply, State}.
@@ -36,19 +41,11 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-%% Protocol implementation starts here
-
-start_listening(Port) ->
-  init_cache(),
-  {ok, Listen} = gen_tcp:listen(Port, [binary, {packet, 0}, 
-    {reuseaddr, true}, {active, once}]),
-  spawn(fun() -> connect(Listen) end).
+%% Module implementation begins here
 
 connect(Listen) ->
   {ok, Socket} = gen_tcp:accept(Listen),
-  %% fully-qualified function name to connect will invoke latest
-  %% loaded code, enabling hot code swap :0)
-  spawn(fun() -> erlcached:connect(Listen) end),
+  spawn(fun() -> connect(Listen) end),
   loop(Socket, []).
  
 %% Loops over a socket until a complete request has been received from a
@@ -60,15 +57,12 @@ loop(Socket, Request) ->
     {tcp, Socket, Data} ->
       inet:setopts(Socket, [{active, once}]),
       Request1 = Request ++ binary_to_list(Data),
-      case receive_command(Request1, []) of
+      case receive_first_line_of_command(Request1, []) of
         more ->
           loop(Socket, Request1);
         {Command, _Rest} ->
-          try parse_and_execute(Socket, Request1) of 
-          catch
-            throw:Error -> 
-              gen_tcp:send(Socket, "SERVER_ERROR " ++ Error ++ ?END)
-          end
+          gen_tcp:send(Socket, "Received command: " ++ Command),
+          gen_tcp:close(Socket)
       end;
     {tcp_closed, Socket} ->
       io:format("server socket closed~n");
@@ -76,3 +70,19 @@ loop(Socket, Request) ->
       io:format("received unknown message~n")
   end.
 
+%% Gets the port that we listen on from the application
+%% configuration.
+get_port() ->
+  case application:get_env(erlcached_memcached_ascii_protocol, port) of
+    {ok, Port} when is_integer(Port), Port > 0, Port < 65535 ->
+      Port;
+    Bad -> exit({bad_config, {erlcached_memcached_ascii_protocol, {port, Bad}}})
+  end.
+
+
+%% If we are at the end of request, return the request
+receive_first_line_of_command("\r\n" ++ T, L) -> {lists:reverse(L), T};               
+%% Work our way through the list, from H to T
+receive_first_line_of_command([H|T], L)           -> receive_first_line_of_command(T, [H|L]);     
+%% We went thru list with no "\r\n\r\n" so we need more.
+receive_first_line_of_command([], _)              -> more.      
