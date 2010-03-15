@@ -25,6 +25,12 @@ No excuses really. But what prompted me to get off my arse and release
 it was a promise I made with @GarryDanger at #rorosyd after too much beer.
 The crazy man remembered!
 
+# Protocol Documentation
+
+[ASCII Protocol](http://code.sixapart.com/svn/memcached/trunk/server/doc/protocol.txt "ASCII Protocol")
+
+[Binary Protocol](http://code.google.com/p/memcached/wiki/MemcacheBinaryProtocol "Binary Protocol")
+
 # License
 
 This project is licensed under the MIT License.
