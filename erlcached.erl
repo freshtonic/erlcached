@@ -62,7 +62,7 @@ handle_request(Request, Socket) ->
   case parse_request(Request) of
     {cache_set, Key, Value}    -> set_value(Key, Value);
     {cache_get, Key}           -> get_value(Key);
-    {cache_delete, Key}        -> delete_value(Key);
+    {cache_del, Key}           -> delete_value(Key);
     {general_stats}            -> send_general_stats();
     {key_stats, Key}           -> send_key_stats(Key);
     {parse_error, Reason}      -> self() ! {parse_error, Reason}
@@ -79,37 +79,34 @@ handle_request(Request, Socket) ->
       -> gen_tcp:send(Socket, "OK KEY STATS " ++ Key1 ++ " " ++ Stats ++ ?END);
     {general_stats_ok, Stats}   
       -> gen_tcp:send(Socket, "OK GENERAL STATS "  ++ Stats ++ ?END);
-    {parse_error, Reason1}       
-      -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND: " ++ Reason1 ++ ?END);
+    {parse_error, UnknownCommand}       
+      -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND '" ++ UnknownCommand ++ "'" ++ ?END);
     {command_error, Reason1}     
       -> gen_tcp:send(Socket, "ERR " ++ Reason1 ++ ?END);
     close_connection 
       -> gen_tcp:close(Socket)
   end.
 
-parse_request("SET " ++ KeyValue) ->
-  case regexp:split(KeyValue, " ") of
-    {ok, [Key, Value]} -> parse_set_key_value(Key, Value);
-    _ -> {parse_error, "could not parse set command"}
+parse_request(Request) ->
+  case Request of 
+    "SET " ++ KeyValue ->
+      case regexp:split(KeyValue, " ") of
+        {ok, [Key, Value]} -> 
+            {cache_set, Key, Value};
+        _ -> 
+            {parse_error, "MALFORMED SET COMMAND"}
+      end;
+    "GET " ++ Key ->
+      {cache_get, Key};
+    "DEL " ++ Key ->
+      {cache_del, Key};
+    "STATS" -> 
+      {general_stats};
+    "KEY STATS " ++ Key ->
+      {key_stats, Key};
+    _ ->
+      {parse_error, Request}
   end.
-
-parse_set_key_value(Key, Value) ->
-  {cache_set, Key, Value}.
-
-parse_request("GET " ++ Key) ->
-  {cache_get, Key}.
-
-parse_request("DEL " ++ Key) ->
-  {cache_delete, Key}.
-
-parse_request("STATS") ->
-  {general_stats}.
-
-parse_request("KEY STATS " ++ Key) ->
-  {key_stats, Key}.
-
-parse_request(UnknownCommand) ->
-  {parse_error, "unknown command: " ++ UnknownCommand}.
 
 set_value(Key, Value) ->
   self() ! {set_ok, Key}.
