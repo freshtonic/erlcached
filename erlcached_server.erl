@@ -39,6 +39,8 @@ cache_get(Keys) when is_list(Keys) ->
   gen_server:call(?MODULE, {cache_get, Keys}).
 cache_delete(Key, TimeSeconds) -> 
   gen_server:call(?MODULE, {cache_delete, Key, TimeSeconds}).
+cache_delete(Key) ->
+  gen_server:call(?MODULE, {cache_delete, Key, 0}).
 cache_incr(Key, Amount) -> 
   gen_server:call(?MODULE, {cache_incr, Key, Amount}).
 cache_decr(Key, Amount) -> 
