@@ -56,7 +56,7 @@ loop(Socket, Request) ->
     {tcp, Socket, Data} ->
       Request1 = list_to_binary([Request, Data]),
       {Command, Rest} =  read_line(Socket, Request1, <<>>),
-      try parse_command(Command) of
+      case parse_command(Command) of
         {cmd_set, {Key, Flags, Exptime, ByteCount}} ->
           {Blob, Rest1} = read_blob(Socket, ByteCount, Rest),
           {_, Rest2} = read_line(Socket, Rest1, <<>>),
@@ -69,10 +69,10 @@ loop(Socket, Request) ->
         {cmd_get, Keys} ->
           try handle_get(Socket, Keys)
           catch
-            _:Reason -> handle_error(Socket, {server_error, Reason})
-          end
-      catch
-        _:Reason -> handle_error(Socket, {server_error, Reason})
+            _:_ -> handle_error(Socket, {server_error, ""}) %% TODO: extract the reason
+          end;
+        {bad_command, _BadCommand}->
+          handle_error(Socket, {client_error, "Bad command"})
       end,
       loop(Socket, Rest);
     {tcp_closed, Socket} ->
@@ -119,16 +119,26 @@ parse_command("replace " ++ Rest) ->
   parse_storage_command(cmd_replace, Rest);
 parse_command("get " ++ Rest) ->
   {ok, Keys} = regexp:split(Rest, " "),
-  {cmd_get, [{Key} || Key <- Keys]}.
+  {cmd_get, [{Key} || Key <- Keys]};
+parse_command(BadCommand) ->
+  {bad_command, BadCommand}.
 
 
 parse_storage_command(Command, Rest) ->
   io:format("parse_storage_command~n"),
-  {ok, [Key, Flags, Exptime, ByteCount]} = regexp:split(Rest, " "),
-  {Command, {Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(ByteCount)}}.
+  case regexp:split(Rest, " ") of
+    {ok, [Key, Flags, Exptime, ByteCount]} ->      
+      try {Command, {Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(ByteCount)}} 
+      catch 
+        _:_ -> {bad_command, "set " ++ Rest}
+      end;
+    _ -> {bad_command, "set " ++ Rest}
+  end.
 
-reply(Socket, TextOrData) ->
-  gen_tcp:send(Socket, TextOrData).
+reply(Socket, TextOrData) when is_list(TextOrData) ->
+  reply(Socket, list_to_binary(TextOrData));
+reply(Socket, Data) ->
+  gen_tcp:send(Socket, Data).
 
 %% Replies with values found with the get command
 send_values(Socket, [{Key, {Flags, _, Data}}|Rest]) ->
@@ -148,6 +158,7 @@ handle_error(Socket, Error) ->
     {client_error, Reason} -> reply(Socket, "CLIENT_ERROR " ++ Reason ++ "\r\n");
     error -> reply(Socket, "ERROR\r\n")
   end.
+
 
 %% Reads a blob of binary data (of a predetermined size) from the socket.
 %% Returns a tuple of the form {Blob, Rest} where Rest is the last chunk 
