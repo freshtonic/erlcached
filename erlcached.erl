@@ -67,12 +67,13 @@ handle_request(Request, Socket) ->
     {key_stats, Key}           -> send_key_stats(Key);
     {parse_error, Reason}      -> self() ! {parse_error, Reason}
   end,
-  self() ! close_connection,
   receive
     {set_ok, Key1} 
       -> gen_tcp:send(Socket, "OK SET " ++ Key1 ++ ?END);
     {get_ok, Value1}             
       -> gen_tcp:send(Socket, "OK GET " ++ Value1 ++ ?END);
+    {get_not_found, Key1}
+      -> gen_tcp:send(Socket, "OK KEY NOT FOUND " ++ Key1 ++ ?END);
     {delete_ok, Key1}            
       -> gen_tcp:send(Socket, "OK DELETE " ++ Key1 ++ ?END);
     {key_stats_ok, Key1, Stats}  
@@ -82,9 +83,7 @@ handle_request(Request, Socket) ->
     {parse_error, UnknownCommand}       
       -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND '" ++ UnknownCommand ++ "'" ++ ?END);
     {command_error, Reason1}     
-      -> gen_tcp:send(Socket, "ERR " ++ Reason1 ++ ?END);
-    close_connection 
-      -> gen_tcp:close(Socket)
+      -> gen_tcp:send(Socket, "ERR " ++ Reason1 ++ ?END)
   end.
 
 parse_request(Request) ->
@@ -109,10 +108,22 @@ parse_request(Request) ->
   end.
 
 set_value(Key, Value) ->
-  self() ! {set_ok, Key}.
+  case ets:insert(?TABLE, {list_to_binary(Key), list_to_binary(Value)}) of
+    true
+      -> self() ! {set_ok, Key};
+    _ 
+      -> self() ! {command_error, "FAILED TO INSERT"}
+  end.
 
 get_value(Key) ->
-  self() ! {get_ok, []}.
+  case ets:lookup(?TABLE, list_to_binary(Key)) of 
+    [{_Key1, Value}]
+      -> self() ! {get_ok, binary_to_list(Value)};
+    [] 
+      -> self() ! {get_not_found, Key};
+    _
+      -> self() ! {command_error, "ERROR WHILE GETTING VALUE"}
+  end.
 
 delete_value(Key) ->
   self() ! {delete_ok, Key}.
