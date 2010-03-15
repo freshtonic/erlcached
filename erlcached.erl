@@ -48,40 +48,81 @@ init_cache() ->
 %% Receives  a single  command. It  doesn't validate  the command,  just
 %% reads data until we have read two blank lines. TODO: limit the amount
 %% of data we consume here?
-receive_command(?END ++ T, L) -> {reverse(L), T};               %% If we are at the end of request, return the request
-receive_command([H|T], L)           -> receive_command(T, [H|L]);     %% Work our way through the list, from H to T
-receive_command([], _)              -> more.                          %% We went thru list with no "\r\n\r\n" so we need more.
+
+%% If we are at the end of request, return the request
+receive_command(?END ++ T, L) -> {reverse(L), T};               
+%% Work our way through the list, from H to T
+receive_command([H|T], L)           -> receive_command(T, [H|L]);     
+%% We went thru list with no "\r\n\r\n" so we need more.
+receive_command([], _)              -> more.                          
 
 %% Handles a request from the client.  The request has not been
 %% validated yet.
 handle_request(Request, Socket) ->
   case parse_request(Request) of
-    {cache_set, Key, Value, Expires}    -> set_value(Key, Value, Expires};
-    {cache_get, Key}                    -> get_value(Key);
-    {cache_delete, Key}                 -> delete_value(Key);
-    {cache_stats, Key}                  -> send_key_stats(Key);
-    {cache_stats, general}              -> send_general_stats();
-    {parse_error, Reason}               -> self ! {parse_error, Reason}
-  end;
-  self ! close_connection,
+    {cache_set, Key, Value}    -> set_value(Key, Value);
+    {cache_get, Key}           -> get_value(Key);
+    {cache_delete, Key}        -> delete_value(Key);
+    {general_stats}            -> send_general_stats();
+    {key_stats, Key}           -> send_key_stats(Key);
+    {parse_error, Reason}      -> self() ! {parse_error, Reason}
+  end,
+  self() ! close_connection,
   receive
-    {set_ok, Key}               -> gen_tcp:send(Socket, "OK SET " ++ Key ++ ?END);
-    {get_ok, Value}             -> gen_tcp:send(Socket, "OK GET " ++ Value ++ ?END);
-    {delete_ok, Key}            -> gen_tcp:send(Socket, "OK DELETE " ++ Key ++ ?END);
-    {key_stats_ok, Key, Stats}  -> gen_tcp:send(Socket, "OK KEY STATS " ++ Key ++ " " ++ Stats ++ ?END);
-    {general_stats_ok, Stats}   -> gen_tcp:send(Socket, "OK GENERAL STATS " ++ Key ++ " " ++ Stats ++ ?END);
-    {parse_error, Reason}       -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND: " ++ Reason ++ ?END);
-    {command_error, Reason}     -> gen_tcp:send(Socket, "ERR " ++ Reason ++ ?END)
+    {set_ok, Key1} 
+      -> gen_tcp:send(Socket, "OK SET " ++ Key1 ++ ?END);
+    {get_ok, Value1}             
+      -> gen_tcp:send(Socket, "OK GET " ++ Value1 ++ ?END);
+    {delete_ok, Key1}            
+      -> gen_tcp:send(Socket, "OK DELETE " ++ Key1 ++ ?END);
+    {key_stats_ok, Key1, Stats}  
+      -> gen_tcp:send(Socket, "OK KEY STATS " ++ Key1 ++ " " ++ Stats ++ ?END);
+    {general_stats_ok, Stats}   
+      -> gen_tcp:send(Socket, "OK GENERAL STATS "  ++ Stats ++ ?END);
+    {parse_error, Reason1}       
+      -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND: " ++ Reason1 ++ ?END);
+    {command_error, Reason1}     
+      -> gen_tcp:send(Socket, "ERR " ++ Reason1 ++ ?END);
+    close_connection 
+      -> gen_tcp:close(Socket)
   end.
 
-set_value(Key, Value, _Expires) ->
-  case ets:insert(?TABLE, {Key, Value}) of
-    true -> self ! {cache_set, Key, Value, _Expires},
-    _ -> self ! {command_error, "COULD NOT INSERT KEY " ++ Key}
+parse_request("SET " ++ KeyValue) ->
+  case regexp:split(KeyValue, " ") of
+    {ok, [Key, Value]} -> parse_set_key_value(Key, Value);
+    _ -> {parse_error, "could not parse set command"}
   end.
+
+parse_set_key_value(Key, Value) ->
+  {cache_set, Key, Value}.
+
+parse_request("GET " ++ Key) ->
+  {cache_get, Key}.
+
+parse_request("DEL " ++ Key) ->
+  {cache_delete, Key}.
+
+parse_request("STATS") ->
+  {general_stats}.
+
+parse_request("KEY STATS " ++ Key) ->
+  {key_stats, Key}.
+
+parse_request(UnknownCommand) ->
+  {parse_error, "unknown command: " ++ UnknownCommand}.
+
+set_value(Key, Value) ->
+  self() ! {set_ok, Key}.
 
 get_value(Key) ->
-  case ets:lookup(?TABLE, Key) of
-    [] -> 
-  end.
+  self() ! {get_ok, []}.
 
+delete_value(Key) ->
+  self() ! {delete_ok, Key}.
+
+send_key_stats(Key) ->
+  self() ! {key_stats_ok, Key, []}.
+
+send_general_stats() ->
+  self() ! {general_stats_ok, []}.
+ 
