@@ -6,11 +6,11 @@
 ERL = erl -boot start_clean
 
 MODS = erlcached_server \
-			 erlcached_memcached_ascii_protocol \
-			 erlcached_supervisor \
-			 erlcached_app \
-			 erlcached_launch \
-			 erlcached_debug
+	erlcached_memcached_ascii_protocol \
+	erlcached_supervisor \
+	erlcached_app \
+	erlcached_launch \
+	erlcached_debug
 
 all: compile tags
 
@@ -27,4 +27,4 @@ clean:
 
 tags:
 	ctags --no-warn \
-		`find /usr/lib/erlang/lib/kernel-2.11.2/src -name \*.erl` *.erl
+		`find /usr/lib/erlang/lib/kernel-*/src -name \*.erl` *.erl

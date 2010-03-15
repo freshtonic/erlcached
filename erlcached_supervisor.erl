@@ -3,30 +3,30 @@
 -export([start/0, start_in_shell_for_testing/0, start_link/1, init/1]).
 
 start() ->
-  spawn(fun() -> 
-          supervisor:start_link({local, ?MODULE}, ?MODULE, _Arg = [])
-        end).
+    spawn(fun() -> 
+		  supervisor:start_link({local, ?MODULE}, ?MODULE, _Arg = [])
+	  end).
 
 start_in_shell_for_testing() ->
-  {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, _Arg = []),
-  unlink(Pid).
+    {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, _Arg = []),
+    unlink(Pid).
 
 start_link(Args) ->
-  supervisor:start_link({local, ?MODULE}, ?MODULE, Args).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, Args).
 
 init([]) ->
-  {ok, {{one_for_one, 3, 10},
-    [{tag1,
-       {erlcached_server, start, []},
-       permanent,
-       10000,
-       worker,
-       [erlcached_server]},
-    {tag2,
-       {erlcached_memcached_ascii_protocol, start, []},
-       permanent,
-       10000,
-       worker,
-       [erlcached_memcached_ascii_protocol]}]
-   }}.
-      
+    {ok, {{one_for_one, 3, 10},
+	  [{tag1,
+	    {erlcached_server, start, []},
+	    permanent,
+	    10000,
+	    worker,
+	    [erlcached_server]},
+	   {tag2,
+	    {erlcached_memcached_ascii_protocol, start, []},
+	    permanent,
+	    10000,
+	    worker,
+	    [erlcached_memcached_ascii_protocol]}]
+	 }}.
+
