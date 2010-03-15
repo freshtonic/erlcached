@@ -18,8 +18,12 @@
   code_change/3]).
 -compile(export_all).
 
-start() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-stop() -> gen_server:call(?MODULE, stop).
+start() -> 
+  io:format("erlcached_server:start()~n"),
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+stop() -> 
+  io:format("erlcached_server:stop()~n"),
+  gen_server:call(?MODULE, stop).
 
 %% The functions starting with 'cache_' represent the exported interface
 %% to the cache.
@@ -43,11 +47,15 @@ cache_stats(Key) ->
   gen_server:call(?MODULE, {cache_stats, Key}).
 cache_stats() ->
   gen_server:call(?MODULE, {cache_stats}).
+die() ->
+  gen_server:call(?MODULE, {die}).
 
 %% Initialises the module.  cache_table is the cache itself.
 %% metadata_table stores the metadata about the cache table 
 %% and various runtime statistics and state.
-init([]) -> {ok, {ets:new(cache_table, [set, public]), 
+init([]) -> 
+  io:format("erlcached_server:init()~n"),
+  {ok, {ets:new(cache_table, [set, public]), 
                   ets:new(meta_data_table, [set, public])}}.
 
 %% gen_server required callbacks:
@@ -127,7 +135,10 @@ handle_call({cache_stats}, _From, State) ->
             {"bytes_written"},
             {"limit_maxbytes"}
           ], 
-            State}.
+            State};
+
+handle_call({die}, _From, _State) ->
+  throw(die_horribly).
 
 handle_cast(_Msg, State) ->
   {noreply, State}.

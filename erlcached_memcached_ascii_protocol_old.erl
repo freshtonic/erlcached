@@ -44,7 +44,7 @@ code_change(_OldVsn, State, _Extra) ->
 connect(Listen) ->
   {ok, Socket} = gen_tcp:accept(Listen),
   spawn(fun() -> connect(Listen) end),
-  loop(Socket, []).
+  loop(Socket, <<>>).
  
 %% Loops over a socket until a complete request has been received from a
 %% client. Once  a complete request  has been received, it  is validated
@@ -56,7 +56,7 @@ loop(Socket, Request) ->
     {tcp, Socket, Data} ->
       Request1 = list_to_binary([Request, Data]),
       {Command, Rest} =  read_line(Socket, Request1, <<>>),
-      case parse_command(Command) of
+      Rest3 = case parse_command(Command) of
         {storage_command, CommandFunc, {Key, Flags, Exptime, ByteCount}} ->
           {Blob, Rest1} = read_blob(Socket, ByteCount, Rest),
           {_, Rest2} = read_line(Socket, Rest1, <<>>),
@@ -65,16 +65,18 @@ loop(Socket, Request) ->
              Error -> handle_error(Socket, Error)
           end,
           io:format("next command~n"),
-          loop(Socket, Rest2);
+          Rest2;
         {cmd_get, Keys} ->
           try handle_get(Socket, Keys)
           catch
             _:_ -> handle_error(Socket, {server_error, ""}) %% TODO: extract the reason
-          end;
+          end,
+          <<>>;
         {bad_command, _BadCommand}->
-          handle_error(Socket, {client_error, "Bad command"})
+          handle_error(Socket, {client_error, "Bad command"}),
+          <<>>
       end,
-      loop(Socket, Rest);
+      loop(Socket, list_to_binary([Rest, Rest3]));
     {tcp_closed, Socket} ->
       io:format("server socket closed~n");
     _Any ->
