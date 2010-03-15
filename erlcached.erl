@@ -86,6 +86,8 @@ handle_request(Request, Socket) ->
       -> gen_tcp:send(Socket, "ERR " ++ Reason1 ++ ?END)
   end.
 
+%% Parses the request string and returns a tuple representing the command
+%% details.
 parse_request(Request) ->
   case Request of 
     "SET " ++ KeyValue ->
@@ -107,6 +109,9 @@ parse_request(Request) ->
       {parse_error, Request}
   end.
 
+%% Sets a value in the ETS table.  ETS supports multiple values per Key
+%% and we don't want that, so we clear the content of the key in the table
+%% before we insert the new value.
 set_value(Key, Value) ->
   case ets:delete(?TABLE, list_to_binary(Key)) of
     true 
@@ -120,6 +125,7 @@ set_value(Key, Value) ->
       -> self() ! {command_error, "COULD NOT CLEAR KEY BEFORE INSERT"}
   end.
 
+%% Gets the value stored at a particular key.
 get_value(Key) ->
   case ets:lookup(?TABLE, list_to_binary(Key)) of 
     [{_Key1, Value}]
@@ -130,8 +136,14 @@ get_value(Key) ->
       -> self() ! {command_error, "ERROR WHILE GETTING VALUE"}
   end.
 
+%% Deletes a value stored at a particular key.
 delete_value(Key) ->
-  self() ! {delete_ok, Key}.
+  case ets:delete(?TABLE, list_to_binary(Key)) of 
+    true
+      -> self() ! {delete_ok, Key};
+    _
+      -> self() ! {command_error, "UNABLE TO DELETE KEY " ++ Key}
+  end.
 
 send_key_stats(Key) ->
   self() ! {key_stats_ok, Key, []}.
