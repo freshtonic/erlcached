@@ -2,7 +2,7 @@
 -export([start/1]).
 -import(lists, [reverse/1]).
 -define(TABLE, erlcached_table).
--define(END, "\r\n\r\n").
+-define(END, "\r\n").
 
 %% Starts  erlcached listening  on Port  The server  listens using  the.
 %% 'Hybrid Approach' (neither blocking  nor non-blocking) This function.
@@ -15,7 +15,9 @@ start(Port) ->
 
 connect(Listen) ->
   {ok, Socket} = gen_tcp:accept(Listen),
-  spawn(fun() -> connect(Listen) end),
+  %% fully-qualified function name to connect will invoke latest
+  %% loaded code, enabling hot code swap :0)
+  spawn(fun() -> erlcached:connect(Listen) end),
   loop(Socket, []).
  
 %% Loops over a socket until a complete request has been received from a
@@ -29,11 +31,13 @@ loop(Socket, Request) ->
       Request1 = Request ++ binary_to_list(Data),
       case receive_command(Request1, []) of
         more ->
-          %% the request is incomplete, we need more data
           loop(Socket, Request1);
-        {CompleteRequest, _Rest} ->
-          %% header is complete
-          handle_request(CompleteRequest, Socket)
+        {Command, _Rest} ->
+          try parse_and_execute(Socket, Request1) of 
+          catch
+            throw:Error -> 
+              gen_tcp:send(Socket, "SERVER_ERROR " ++ Error ++ ?END)
+          end
       end;
     {tcp_closed, Socket} ->
       io:format("server socket closed~n");
@@ -56,98 +60,134 @@ receive_command([H|T], L)           -> receive_command(T, [H|L]);
 %% We went thru list with no "\r\n\r\n" so we need more.
 receive_command([], _)              -> more.                          
 
-%% Handles a request from the client.  The request has not been
-%% validated yet.
-handle_request(Request, Socket) ->
-  case parse_request(Request) of
-    {cache_set, Key, Value}    -> set_value(Key, Value);
-    {cache_get, Key}           -> get_value(Key);
-    {cache_del, Key}           -> delete_value(Key);
-    {general_stats}            -> send_general_stats();
-    {key_stats, Key}           -> send_key_stats(Key);
-    {parse_error, Reason}      -> self() ! {parse_error, Reason}
-  end,
+%% Parses a Memcached command and returns a tuple containing
+%% the function to invoke and its arguments.  If there was an error
+%% parsing the command or its arguments, a tuple of the form 
+%% {error, Description} will be returned.
+%% The specs for the protocol can be found here:
+%% http://cvs.danga.com/browse.cgi/wcmtools/memcached/doc/protocol.txt?rev=HEAD&content-type=text/plain
+parse_command("set " ++ T)
+  -> make_storage_command(command_set, parse_rest_of_storage_command(T));
+parse_command("add " ++ T)
+  -> make_storage_command(command_add, parse_rest_of_storage_command(T));
+parse_command("replace " ++ T)
+  -> make_storage_command(command_replace, parse_rest_of_storage_command(T));
+parse_command("delete " ++ T)
+  -> make_deletion_command(parse_rest_of_deletion_command(T));
+parse_command("get " ++ T)
+  -> make_retrieval_command(parse_rest_of_retrieval_command(T));
+parse_command("stats" ++ T) -> 
+  case T of
+    [] -> make_stats_command();
+    " " ++ Args -> make_stats_command(parse_rest_of_stats_command(T))
+  end;
+parse_command("incr " ++ T) ->
+  make_incr_or_decr_command(command_incr, T);
+parse_command("decr " ++ T) ->
+  make_incr_or_decr_command(command_decr, T);
+parse_command(BadCommand) 
+  -> {error, BadCommand}.
+
+
+parse_rest_of_storage_command(Rest) ->
+  case regexp:split(Rest, " ") of
+    [Key, Flags, Exptime, Bytes] -> {Key, Flags, Exptime, Bytes};
+    _ -> error
+  end.
+
+parse_rest_of_deletion_command(Rest) ->
+  case regexp:split(Rest, " ") of
+    [Key, Time] -> {Key, Time}
+  end.
+
+parse_rest_of_retrieval_command(Rest) ->
+  case Rest of 
+    " " ++ Key -> {Key};
+    _ -> error
+  end.
+      
+parse_rest_of_stats_command(Rest) ->
+  nothing.
+
+make_storage_command(Command, {Key, Flags, Exptime, Bytes}) ->
+  CommandFunc = case Command of 
+                  command_set -> fun set_value/4;
+                  command_add -> fun add_value/4;
+                  command_replace -> fun replace_value/4
+                end,
+  {CommandFunc, Key, list_to_integer(Flags), list_to_integer(Exptime), list_to_integer(Bytes)}.
+
+make_deletion_command({Key, Time}) ->
+  {fun delete/2, Key, list_to_integer(Time)}.
+
+make_retrieval_command(Keys) ->
+  {fun get_value/1, Keys}.
+
+make_incr_or_decr_command(Command, Rest) ->
+  CommandFunc = case Command of
+                  command_incr -> fun incr_value/2;
+                  command_decr -> fun decr_value/2
+                end,
+  case regexp:split(Rest) of
+    [Key, Value] -> 
+      {CommandFunc, Key, list_to_integer(Value)};
+    _ -> error
+  end.
+
+make_stats_command() ->
+  {fun stats/1}.
+
+make_stats_command(Args) ->
+ {error}. 
+
+%% The following functions are those that manipulate or query the cache.
+
+set_value(Socket, Key, Flags, Exptime, Bytes) ->
+  ets:delete(?TABLE, Key), %% clear any existing value at the key.
+  ets:insert(?TABLE, {Key, Exptime, Flags, Bytes}).
+
+get_value(Socket, Keys) ->
+  {no}.
+
+add_value(Socket, Key, Flags, Exptime, Bytes) ->
+  case ets:lookup(?TABLE, Key) of 
+    [] -> set_value(Key, Flags, Exptime, Bytes),
+        ok;
+    _ -> {error, "key already exists"}
+  end.
+
+replace_value(Socket, Key, Flags, Exptime, Bytes) ->
+  case ets:lookup(?TABLE, Key) of
+    [] -> {error, "key does not exist"};
+    _ -> set_value(Key, Flags, Exptime, Bytes),
+        ok
+  end.
+
+delete(Socket, Key, Time) ->
+  spawn(fun() -> delayed_delete(Key, Time) end).
+
+delayed_delete(Key, Time) ->
   receive
-    {set_ok, Key1} 
-      -> gen_tcp:send(Socket, "OK SET " ++ Key1 ++ ?END);
-    {get_ok, Value1}             
-      -> gen_tcp:send(Socket, "OK GET " ++ Value1 ++ ?END);
-    {get_not_found, Key1}
-      -> gen_tcp:send(Socket, "OK KEY NOT FOUND " ++ Key1 ++ ?END);
-    {delete_ok, Key1}            
-      -> gen_tcp:send(Socket, "OK DELETE " ++ Key1 ++ ?END);
-    {key_stats_ok, Key1, Stats}  
-      -> gen_tcp:send(Socket, "OK KEY STATS " ++ Key1 ++ " " ++ Stats ++ ?END);
-    {general_stats_ok, Stats}   
-      -> gen_tcp:send(Socket, "OK GENERAL STATS "  ++ Stats ++ ?END);
-    {parse_error, UnknownCommand}       
-      -> gen_tcp:send(Socket, "ERR MALFORMED OR UNKNOWN COMMAND '" ++ UnknownCommand ++ "'" ++ ?END);
-    {command_error, Reason1}     
-      -> gen_tcp:send(Socket, "ERR " ++ Reason1 ++ ?END)
+    Any -> Any
+  after Time ->
+    ets:delete(?TABLE, Time)
   end.
 
-%% Parses the request string and returns a tuple representing the command
-%% details.
-parse_request(Request) ->
-  case Request of 
-    "SET " ++ KeyValue ->
-      case regexp:split(KeyValue, " ") of
-        {ok, [Key, Value]} -> 
-            {cache_set, Key, Value};
-        _ -> 
-            {parse_error, "MALFORMED SET COMMAND"}
-      end;
-    "GET " ++ Key ->
-      {cache_get, Key};
-    "DEL " ++ Key ->
-      {cache_del, Key};
-    "STATS" -> 
-      {general_stats};
-    "KEY STATS " ++ Key ->
-      {key_stats, Key};
-    _ ->
-      {parse_error, Request}
+incr_value(Socket, Key, Value) ->
+  {ok}.
+
+decr_value(Socket, Key, Value) ->
+  {ok}.
+
+stats(Socket, Key) ->
+  {ok}.
+
+%% Utility functions
+
+key_exists(Key) ->
+  case ets:lookup(?TABLE, Key) of
+    [] -> false
+    _ -> true
   end.
 
-%% Sets a value in the ETS table.  ETS supports multiple values per Key
-%% and we don't want that, so we clear the content of the key in the table
-%% before we insert the new value.
-set_value(Key, Value) ->
-  case ets:delete(?TABLE, list_to_binary(Key)) of
-    true 
-      -> case ets:insert(?TABLE, {list_to_binary(Key), list_to_binary(Value)}) of
-          true
-            -> self() ! {set_ok, Key};
-          _ 
-            -> self() ! {command_error, "FAILED TO INSERT"}
-          end;
-     _
-      -> self() ! {command_error, "COULD NOT CLEAR KEY BEFORE INSERT"}
-  end.
 
-%% Gets the value stored at a particular key.
-get_value(Key) ->
-  case ets:lookup(?TABLE, list_to_binary(Key)) of 
-    [{_Key1, Value}]
-      -> self() ! {get_ok, binary_to_list(Value)};
-    [] 
-      -> self() ! {get_not_found, Key};
-    _
-      -> self() ! {command_error, "ERROR WHILE GETTING VALUE"}
-  end.
-
-%% Deletes a value stored at a particular key.
-delete_value(Key) ->
-  case ets:delete(?TABLE, list_to_binary(Key)) of 
-    true
-      -> self() ! {delete_ok, Key};
-    _
-      -> self() ! {command_error, "UNABLE TO DELETE KEY " ++ Key}
-  end.
-
-send_key_stats(Key) ->
-  self() ! {key_stats_ok, Key, []}.
-
-send_general_stats() ->
-  self() ! {general_stats_ok, []}.
- 
